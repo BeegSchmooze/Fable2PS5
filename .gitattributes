@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.bin binary
+*.xpso binary
+*.patch -text
+# Kept byte for byte (CRLF) as in the verified build.
+overlay/PS5_Fable2/build/ps5/fable2-link-sweep/provider-batch19/devloop_png.cpp -text
+overlay/PS5_Fable2/build/ps5/fable2-link-sweep/provider-batch21/ps5_display_surface.h -text

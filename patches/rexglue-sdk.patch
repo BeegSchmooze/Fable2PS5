@@ -1,0 +1,1490 @@
+diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+index d876846..0bf8308 100644
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,7 +116,7 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(REX_PS5_BUILD)
+ // Apple libc++ does not expose clock_time_conversion or clock_cast.
+ template <class, class>
+ struct clock_time_conversion {};
+diff --git a/include/rex/platform.h b/include/rex/platform.h
+index e90418d..da24a42 100644
+--- a/include/rex/platform.h
++++ b/include/rex/platform.h
+@@ -35,6 +35,8 @@
+ #elif defined(__ANDROID__)
+ #define REX_PLATFORM_ANDROID 1
+ #define REX_PLATFORM_LINUX 1
++#elif defined(REX_PS5_BUILD)
++#define REX_PLATFORM_PS5 1
+ #elif defined(__gnu_linux__)
+ #define REX_PLATFORM_GNU_LINUX 1
+ #define REX_PLATFORM_LINUX 1
+@@ -44,6 +46,9 @@
+ 
+ // Ensure all platform macros are always defined (0 when inactive)
+ // so they can be used in static_assert and regular expressions.
++#ifndef REX_PLATFORM_PS5
++#define REX_PLATFORM_PS5 0
++#endif
+ #ifndef REX_PLATFORM_MAC
+ #define REX_PLATFORM_MAC 0
+ #endif
+diff --git a/include/rex/platform/dynlib.h b/include/rex/platform/dynlib.h
+index e3fc40d..c08156e 100644
+--- a/include/rex/platform/dynlib.h
++++ b/include/rex/platform/dynlib.h
+@@ -71,6 +71,14 @@ inline constexpr const char* kVulkanLoader = "libvulkan.1.dylib";
+ inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
+ inline constexpr const char* kSpirvToolsSdkPath = "lib/libSPIRV-Tools-shared.dylib";
+ 
++#elif REX_PLATFORM_PS5
++
++// PS5 integration: Vulkan/RADV is linked into the title.
++// Dynamic library loading is not implemented here.
++inline constexpr const char* kVulkanLoader = "";
++inline constexpr const char* kRenderDoc = "";
++inline constexpr const char* kSpirvToolsSdkPath = "";
++
+ #else
+ #error No library names provided for the target platform.
+ #endif
+diff --git a/include/rex/string/numeric.h b/include/rex/string/numeric.h
+index 85994c7..eec442c 100644
+--- a/include/rex/string/numeric.h
++++ b/include/rex/string/numeric.h
+@@ -26,7 +26,7 @@
+ #include <rex/string/utf8.h>
+ #include <rex/vec128.h>
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #include <locale.h>
+ #endif
+ 
+@@ -114,7 +114,7 @@ inline T ifs(const std::string_view value, bool force_hex) {
+   return result;
+ }
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ template <typename T>
+ inline std::from_chars_result portable_float_from_chars(const char* first, const char* last,
+                                                         T& value) {
+@@ -189,7 +189,7 @@ inline T fpfs(const std::string_view value, bool force_hex) {
+     }
+     std::memcpy(&result, &pun, sizeof(PUN));
+   } else {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+     auto [p, error] = portable_float_from_chars(range.data(), range.data() + range.size(), result);
+ #else
+     auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
+@@ -316,7 +316,7 @@ inline vec128_t from_string<vec128_t>(const std::string_view value, bool force_h
+         assert_always();
+         return vec128_t();
+       }
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5
+       auto result = detail::portable_float_from_chars(p, end, v.f32[i]);
+ #else
+       auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
+diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
+index 0c39a42..510f64f 100644
+--- a/include/rex/system/xmemory.h
++++ b/include/rex/system/xmemory.h
+@@ -39,7 +39,7 @@ namespace rex::memory::detail {
+ ///   - macOS x86_64:    4KB granularity  -> no offset
+ ///   - Linux (any):     4KB granularity  -> no offset (mmap handles it natively)
+ constexpr u32 PhysicalHostOffset([[maybe_unused]] u32 guest_addr) noexcept {
+-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
++#if REX_PLATFORM_WIN32 || REX_PLATFORM_PS5 || (REX_PLATFORM_MAC && defined(__aarch64__))
+   return (guest_addr >= 0xE0000000u) ? 0x1000u : 0u;
+ #else
+   return 0u;
+@@ -59,6 +59,7 @@ inline T GuestPtr(u8* base, u32 guest_address) noexcept {
+ }
+ 
+ class Memory;
++class Ps5GuestArena;
+ 
+ enum SystemHeapFlag : uint32_t {
+   kSystemHeapVirtual = 1 << 0,
+@@ -587,7 +588,14 @@ class Memory {
+   std::vector<FunctionTableEntry> function_tables_;
+   mutable std::mutex function_tables_mutex_;
+ 
++#if REX_PLATFORM_PS5
++  bool EnsurePs5Backing(void* host_address, size_t bytes);
++#endif
++
+   rex::memory::FileMappingHandle mapping_ = rex::memory::kFileMappingHandleInvalid;
++#if REX_PLATFORM_PS5
++  std::unique_ptr<Ps5GuestArena> ps5_arena_;
++#endif
+   uint8_t* mapping_base_ = nullptr;
+   union {
+     struct {
+diff --git a/include/rex/thread/fiber.h b/include/rex/thread/fiber.h
+index 352af67..0166bc0 100644
+--- a/include/rex/thread/fiber.h
++++ b/include/rex/thread/fiber.h
+@@ -14,7 +14,7 @@
+ #include <rex/platform.h>
+ #include <cstddef>
+ 
+-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5
+ #if REX_PLATFORM_MAC && !defined(_XOPEN_SOURCE)
+ // Darwin hides the deprecated ucontext APIs unless _XOPEN_SOURCE is defined
+ // before including <ucontext.h>.
+@@ -51,9 +51,35 @@ struct Fiber {
+   static Fiber* Current() { return tls_current_; }
+ 
+  private:
++  #if REX_PLATFORM_PS5
++  static constinit thread_local Fiber* tls_current_;
++#else
+   static thread_local Fiber* tls_current_;
++#endif
++
++#if REX_PLATFORM_PS5
++  // Cooperative x86-64 context. Offsets used by rex_ps5_native_swap.
++  struct alignas(16) Context {
++    uint64_t rsp = 0;
++    uint64_t rbx = 0;
++    uint64_t rbp = 0;
++    uint64_t r12 = 0;
++    uint64_t r13 = 0;
++    uint64_t r14 = 0;
++    uint64_t r15 = 0;
++    uint32_t mxcsr = 0x1f80;
++    uint16_t fcw = 0x037f;
++    uint16_t reserved = 0;
++  } context_{};
++
++  std::vector<uint8_t> stack_;
++  void (*entry_)(void*) = nullptr;
++  void* arg_ = nullptr;
++  bool is_thread_fiber_ = false;
++
++  static void Trampoline();
+ 
+-#if REX_PLATFORM_WIN32
++#elif REX_PLATFORM_WIN32
+   void* handle_ = nullptr;
+   bool is_thread_fiber_ = false;
+ #elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..8d7039e 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -124,7 +124,7 @@ extern PPCFuncMapping PPCFuncMappings[];
+ // Memory Access
+ //=============================================================================
+ 
+-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
++#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64) || defined(REX_PLATFORM_PS5)
+ #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
+ #else
+ #define REX_PHYS_HOST_OFFSET(addr) 0u
+diff --git a/src/core/math_gcc.cpp b/src/core/math_gcc.cpp
+index 1ec7192..dbe3dc2 100644
+--- a/src/core/math_gcc.cpp
++++ b/src/core/math_gcc.cpp
+@@ -34,14 +34,25 @@ uint8_t tzcnt(uint64_t v) {
+ }
+ 
+ bool bit_scan_forward(uint32_t v, uint32_t* out_first_set_index) {
+-  int i = ffs(v);
+-  *out_first_set_index = i - 1;
+-  return i != 0;
++  if (!v) {
++    *out_first_set_index = UINT32_MAX;
++    return false;
++  }
++
++  *out_first_set_index =
++      static_cast<uint32_t>(__builtin_ctz(v));
++  return true;
+ }
++
+ bool bit_scan_forward(uint64_t v, uint32_t* out_first_set_index) {
+-  int i = __builtin_ffsll(v);
+-  *out_first_set_index = i - 1;
+-  return i != 0;
++  if (!v) {
++    *out_first_set_index = UINT32_MAX;
++    return false;
++  }
++
++  *out_first_set_index =
++      static_cast<uint32_t>(__builtin_ctzll(v));
++  return true;
+ }
+ 
+ }  // namespace rex
+diff --git a/src/core/platform/env_posix.cpp b/src/core/platform/env_posix.cpp
+index fb794b2..ef3e9a9 100644
+--- a/src/core/platform/env_posix.cpp
++++ b/src/core/platform/env_posix.cpp
+@@ -12,7 +12,7 @@
+ #include <rex/platform.h>
+ #include <rex/platform/env.h>
+ 
+-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
++static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5, "This file requires POSIX environment APIs");
+ 
+ #include <cstdlib>
+ #include <string>
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..7e8fc2a 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
++#include <thread>
+ #include <forward_list>
+ 
+ #include <disruptorplus/multi_threaded_claim_strategy.hpp>
+@@ -39,12 +41,20 @@ class TimerQueue {
+         claim_strategy_(kWaitCount, wait_strategy_),
+         consumed_(wait_strategy_) {
+     claim_strategy_.add_claim_barrier(consumed_);
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++    dispatch_thread_ = std::thread([this] { TimerThreadMain(); });
++#else
+     dispatch_thread_ =
+         std::jthread([this](std::stop_token stop_token) { TimerThreadMain(stop_token); });
++#endif
+   }
+ 
+   ~TimerQueue() {
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++    stop_requested_.store(true, std::memory_order_release);
++#else
+     dispatch_thread_.request_stop();
++#endif
+ 
+     // Kick dispatch thread to check stop token
+     auto wait_item = std::make_shared<WaitItem>(nullptr, nullptr, this, clock::time_point::min(),
+@@ -52,10 +62,20 @@ class TimerQueue {
+     wait_item->Disarm();
+     QueueTimer(std::move(wait_item));
+ 
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++    if (dispatch_thread_.joinable()) {
++      dispatch_thread_.join();
++    }
++#else
+     // std::jthread auto-joins on destruction
++#endif
+   }
+ 
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++  void TimerThreadMain() {
++#else
+   void TimerThreadMain(std::stop_token stop_token) {
++#endif
+     dp::sequence_t next_sequence = 0;
+     const auto comp = [](const std::shared_ptr<WaitItem>& left,
+                          const std::shared_ptr<WaitItem>& right) {
+@@ -64,7 +84,11 @@ class TimerQueue {
+ 
+     set_current_thread_name("rex::thread::TimerQueue");
+ 
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++    while (!stop_requested_.load(std::memory_order_acquire)) {
++#else
+     while (!stop_token.stop_requested()) {
++#endif
+       {
+         // Consume new wait items and add them to sorted wait queue
+         dp::sequence_t available = claim_strategy_.wait_until_published(
+@@ -136,7 +160,11 @@ class TimerQueue {
+     return wait_item_weak;
+   }
+ 
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++  std::thread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
++#else
+   std::jthread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
++#endif
+ 
+  private:
+   // This ring buffer will be used to introduce timers queued by the public API
+@@ -149,7 +177,12 @@ class TimerQueue {
+   // This is a _sorted_ (ascending due_) list of active timers managed by a
+   // dedicated thread
+   std::forward_list<std::shared_ptr<WaitItem>> wait_queue_;
++#if defined(REX_PLATFORM_PS5) && REX_PLATFORM_PS5
++  std::atomic<bool> stop_requested_{false};
++  std::thread dispatch_thread_;
++#else
+   std::jthread dispatch_thread_;
++#endif
+ };
+ 
+ rex::thread::TimerQueue timer_queue_;
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 58e36a4..961838b 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -37,7 +37,7 @@
+ // NOTE: must be included last as it expects windows.h to already be included.
+ #define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
+ #include <winsock2.h>                    // NOLINT(build/include_order)
+-#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC || defined(REX_PLATFORM_PS5)
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_ob.cpp b/src/kernel/xboxkrnl/xboxkrnl_ob.cpp
+index 5709e6d..0b94c3f 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_ob.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_ob.cpp
+@@ -177,7 +177,7 @@ u32 ObCreateSymbolicLink_entry(ppc_ptr_t<X_ANSI_STRING> path_ptr,
+   auto target = rex::string::utf8_canonicalize_guest_path(
+       util::TranslateAnsiPath(REX_KERNEL_MEMORY(), target_ptr));
+ 
+-  if (rex::string::utf8_starts_with(path, u8"\\??\\")) {
++  if (rex::string::utf8_starts_with(path, "\\??\\")) {
+     path = path.substr(4);  // Strip the full qualifier
+   }
+ 
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..1cb80e1 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -28,6 +28,9 @@
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/mmio_handler.h>
+ #include <rex/system/xmemory.h>
++#if REX_PLATFORM_PS5
++#include <rex/platform/ps5_guest_arena.h>
++#endif
+ #include <rex/thread.h>
+ 
+ // TODO(benvanik): move xbox.h out
+@@ -99,6 +102,60 @@ Memory::Memory() {
+   active_memory_ = this;
+ }
+ 
++
++#if REX_PLATFORM_PS5
++bool Memory::EnsurePs5Backing(void* host_address, size_t bytes) {
++    if (!ps5_arena_ || !host_address || !bytes)
++        return false;
++
++    const uintptr_t base =
++        reinterpret_cast<uintptr_t>(mapping_base_);
++    const uintptr_t host =
++        reinterpret_cast<uintptr_t>(host_address);
++
++    if (host < base)
++        return false;
++
++    const uint64_t offset = host - base;
++    constexpr uint64_t size = Ps5GuestArena::kSize;
++    constexpr uint64_t unit = Ps5GuestArena::kUnit;
++
++    if (offset >= size || bytes > size - offset)
++        return false;
++
++    const uint64_t first = offset & ~(unit - 1);
++    const uint64_t last =
++        (offset + bytes - 1) & ~(unit - 1);
++
++    for (uint64_t page = first; page <= last; page += unit) {
++        bool ok = false;
++
++        if (page < 0x7F000000ULL) {
++            ok = ps5_arena_->mapVirtual(uint32_t(page));
++        } else if (page < 0x80000000ULL) {
++            ok = ps5_arena_->mapPhysical(
++                uint32_t(page - 0x7F000000ULL));
++        } else if (page < 0xA0000000ULL) {
++            ok = ps5_arena_->mapXex(
++                uint32_t((page - 0x80000000ULL) %
++                         0x10000000ULL));
++        } else if (page < 0x100000000ULL) {
++            ok = ps5_arena_->mapPhysical(
++                uint32_t((page - 0xA0000000ULL) %
++                         0x20000000ULL));
++        } else if (page < 0x120000000ULL) {
++            ok = ps5_arena_->mapPhysical(
++                uint32_t(page - 0x100000000ULL));
++        }
++
++        if (!ok)
++            return false;
++    }
++
++    return true;
++}
++#endif
++
+ Memory::~Memory() {
+   assert_true(active_memory_ == this);
+   active_memory_ = nullptr;
+@@ -119,6 +176,10 @@ Memory::~Memory() {
+   heaps_.vE0000000.Dispose();
+   heaps_.physical.Dispose();
+ 
++#if REX_PLATFORM_PS5
++  ps5_arena_.reset();
++  mapping_base_ = nullptr;
++#else
+   // Unmap all views and close mapping.
+   if (mapping_ != rex::memory::kFileMappingHandleInvalid) {
+     UnmapViews();
+@@ -127,13 +188,46 @@ Memory::~Memory() {
+     mapping_ = rex::memory::kFileMappingHandleInvalid;
+   }
+ 
++#endif
++
+   virtual_membase_ = nullptr;
+   physical_membase_ = nullptr;
+ }
+ 
+ bool Memory::Initialize() {
++  // BEGIN PS5 INITIALIZER GUARDS
+   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
+ 
++#if REX_PLATFORM_PS5
++  // Reserve the entire guest address space without backing it all.
++  ps5_arena_ = std::make_unique<Ps5GuestArena>();
++
++  if (!ps5_arena_->initialize()) {
++    REXSYS_ERROR("PS5 guest arena reservation failed");
++    ps5_arena_.reset();
++    return false;
++  }
++
++  mapping_base_ = ps5_arena_->address(0);
++
++  // These are reserved address windows. Physical pages will be
++  // populated by the PS5 guest allocation backend.
++  constexpr uint64_t offsets[9] = {
++      0x00000000ULL,
++      0x40000000ULL,
++      0x7F000000ULL,
++      0x80000000ULL,
++      0x90000000ULL,
++      0xA0000000ULL,
++      0xC0000000ULL,
++      0xE0000000ULL,
++      0x100000000ULL
++  };
++
++  for (unsigned i = 0; i < 9; ++i)
++    views_.all_views[i] = mapping_base_ + offsets[i];
++
++#else
+   // Create main page file-backed mapping. This is all reserved but
+   // uncommitted (so it shouldn't expand page file).
+   // Round up to allocation granularity to accommodate platforms with large pages.
+@@ -174,6 +268,8 @@ bool Memory::Initialize() {
+     return false;
+   }
+ #endif
++#endif
++
+   virtual_membase_ = mapping_base_;
+   physical_membase_ = mapping_base_ + 0x100000000ull;
+ 
+@@ -202,25 +298,36 @@ bool Memory::Initialize() {
+                               0x1FD00000, 4096, &heaps_.physical);
+ 
+   // Protect the first and last 64kb of memory.
+-  heaps_.v00000000.AllocFixed(0x00000000, 0x10000, 0x10000,
++  if (!heaps_.v00000000.AllocFixed(0x00000000, 0x10000, 0x10000,
+                               memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+                               !REXCVAR_GET(protect_zero)
+                                   ? memory::kMemoryProtectRead | memory::kMemoryProtectWrite
+-                                  : memory::kMemoryProtectNoAccess);
+-  heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000, memory::kMemoryAllocationReserve,
+-                             memory::kMemoryProtectNoAccess);
++                                  : memory::kMemoryProtectNoAccess)) {
++    REXSYS_ERROR("Initialization failed: zero page");
++    return false;
++  }
++  if (!heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000, memory::kMemoryAllocationReserve,
++                             memory::kMemoryProtectNoAccess)) {
++    REXSYS_ERROR("Initialization failed: physical reservation");
++    return false;
++  }
+ 
+   // GPU writeback.
+   // 0xC... is physical, 0x7F... is virtual. We may need to overlay these.
+-  heaps_.vC0000000.AllocFixed(0xC0000000, 0x01000000, 32,
++  if (!heaps_.vC0000000.AllocFixed(0xC0000000, 0x01000000, 32,
+                               memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+-                              memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
++                              memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
++    REXSYS_ERROR("Initialization failed: GPU writeback");
++    return false;
++  }
+ 
+   // Pre-commit the physical memory range so the GPU can access it
+   // without page faults. Reference: xenia-canary 5f5be0668.
++#if !REX_PLATFORM_PS5
+   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
+                           rex::memory::AllocationType::kCommit,
+                           rex::memory::PageAccess::kReadWrite);
++#endif
+ 
+   // Install MMIO handler for physical address translation and MMIO ranges
+   mmio_handler_ = runtime::MMIOHandler::Install(
+@@ -235,16 +342,29 @@ bool Memory::Initialize() {
+ 
+   // ?
+   uint32_t unk_phys_alloc;
+-  heaps_.vA0000000.Alloc(0x340000, 64 * 1024, memory::kMemoryAllocationReserve,
+-                         memory::kMemoryProtectNoAccess, true, &unk_phys_alloc);
++  if (!heaps_.vA0000000.Alloc(0x340000, 64 * 1024, memory::kMemoryAllocationReserve,
++                         memory::kMemoryProtectNoAccess, true, &unk_phys_alloc)) {
++    REXSYS_ERROR("Initialization failed: physical heap reservation");
++    return false;
++  }
+ 
+   // Allocate region at start of XEX range. Title 544307D5 explicitly
+   // accesses 0x8000001C and expects a specific constant value.
+   // Reference: xenia-canary 78f97f8ff.
+   uint32_t unknown_xex_range;
+-  heaps_.v80000000.Alloc(0x40000, 4 * 1024, memory::kMemoryAllocationCommit,
++  if (!heaps_.v80000000.Alloc(0x40000, 4 * 1024, memory::kMemoryAllocationCommit,
+                          memory::kMemoryProtectRead | memory::kMemoryProtectWrite, false,
+-                         &unknown_xex_range);
++                         &unknown_xex_range)) {
++    REXSYS_ERROR("Initialization failed: XEX startup memory");
++    return false;
++  }
++
++#if REX_PLATFORM_PS5
++  if (unknown_xex_range != 0x80000000) {
++    REXSYS_ERROR("XEX startup allocation is at the wrong address");
++    return false;
++  }
++#endif
+ 
+   uint32_t value_to_write = rex::byte_swap(uint32_t(0x2a6e3f38));
+   std::memcpy(TranslateVirtual(0x80000000 + 0x1C), &value_to_write, sizeof(uint32_t));
+@@ -358,6 +478,7 @@ int Memory::MapViewsMac() {
+ }
+ #endif  // REX_PLATFORM_MAC
+ 
++#if !REX_PLATFORM_PS5
+ int Memory::MapViews(uint8_t* mapping_base) {
+   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
+   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
+@@ -386,6 +507,8 @@ void Memory::UnmapViews() {
+   }
+ }
+ 
++#endif
++
+ void Memory::Reset() {
+   heaps_.v00000000.Reset();
+   heaps_.v40000000.Reset();
+@@ -1045,6 +1168,9 @@ void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType hea
+ }
+ 
+ void BaseHeap::Dispose() {
++#if REX_PLATFORM_PS5
++  return; // Ps5GuestArena owns the backing.
++#else
+   // Walk table and release all regions.
+   for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
+     auto& page_entry = page_table_[page_number];
+@@ -1054,6 +1180,7 @@ void BaseHeap::Dispose() {
+       page_number += page_entry.region_page_count;
+     }
+   }
++#endif
+ }
+ 
+ void BaseHeap::DumpMap() {
+@@ -1340,6 +1467,26 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
+     }
+   }
+ 
++#if REX_PLATFORM_PS5
++  if (allocation_type & memory::kMemoryAllocationCommit) {
++    void* host = TranslateRelative(
++        start_page_number << page_size_shift_);
++    const size_t bytes =
++        size_t(page_count) << page_size_shift_;
++
++    if (!memory_->EnsurePs5Backing(host, bytes)) {
++      REXSYS_ERROR("PS5 guest backing allocation failed");
++      return false;
++    }
++
++    if (page_size_ >= memory_->system_page_size_ &&
++        !rex::memory::Protect(host, bytes,
++                              ToPageAccess(protect))) {
++      REXSYS_ERROR("PS5 guest backing protection failed");
++      return false;
++    }
++  }
++#else
+   // Allocate from host.
+   if (allocation_type == memory::kMemoryAllocationReserve) {
+     // Reserve is not needed, as we are mapped already.
+@@ -1356,6 +1503,8 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
+     }
+   }
+ 
++#endif
++
+   // Set page state.
+   for (uint32_t page_number = start_page_number; page_number <= end_page_number; ++page_number) {
+     auto& page_entry = page_table_[page_number];
+@@ -1372,9 +1521,16 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
+     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
+   }
+ 
++#if REX_PLATFORM_PS5
++  if ((allocation_type & memory::kMemoryAllocationCommit) &&
++      !SyncHostPageAccess(start_page_number, end_page_number)) {
++    return false;
++  }
++#else
+   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
+     return false;
+   }
++#endif
+ 
+   if (allocation_type != memory::kMemoryAllocationReserve && REXCVAR_GET(scribble_heap) &&
+       (protect & memory::kMemoryProtectWrite)) {
+@@ -1503,6 +1659,26 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+     return false;
+   }
+ 
++#if REX_PLATFORM_PS5
++  if (allocation_type & memory::kMemoryAllocationCommit) {
++    void* host = TranslateRelative(
++        start_page_number << page_size_shift_);
++    const size_t bytes =
++        size_t(page_count) << page_size_shift_;
++
++    if (!memory_->EnsurePs5Backing(host, bytes)) {
++      REXSYS_ERROR("PS5 guest backing allocation failed");
++      return false;
++    }
++
++    if (page_size_ >= memory_->system_page_size_ &&
++        !rex::memory::Protect(host, bytes,
++                              ToPageAccess(protect))) {
++      REXSYS_ERROR("PS5 guest backing protection failed");
++      return false;
++    }
++  }
++#else
+   // Allocate from host.
+   if (allocation_type == memory::kMemoryAllocationReserve) {
+     // Reserve is not needed, as we are mapped already.
+@@ -1519,6 +1695,8 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+     }
+   }
+ 
++#endif
++
+   // Set page state.
+   for (uint32_t page_number = start_page_number; page_number <= end_page_number; ++page_number) {
+     auto& page_entry = page_table_[page_number];
+@@ -1532,9 +1710,16 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
+   }
+ 
++#if REX_PLATFORM_PS5
++  if ((allocation_type & memory::kMemoryAllocationCommit) &&
++      !SyncHostPageAccess(start_page_number, end_page_number)) {
++    return false;
++  }
++#else
+   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
+     return false;
+   }
++#endif
+ 
+   if (allocation_type != memory::kMemoryAllocationReserve && REXCVAR_GET(scribble_heap) &&
+       (protect & memory::kMemoryProtectWrite)) {
+diff --git a/thirdparty/crypto/sha256.cpp b/thirdparty/crypto/sha256.cpp
+index e96b4da..3c0face 100644
+--- a/thirdparty/crypto/sha256.cpp
++++ b/thirdparty/crypto/sha256.cpp
+@@ -15,9 +15,19 @@
+ #define __BIG_ENDIAN __ORDER_BIG_ENDIAN__
+ #endif
+ #else
++#if defined(REX_PLATFORM_PS5)
++// PS5 x86-64: use Clang's built-in endianness definitions.
++#ifndef __BYTE_ORDER
++#define __BYTE_ORDER __BYTE_ORDER__
++#endif
++#ifndef __BIG_ENDIAN
++#define __BIG_ENDIAN __ORDER_BIG_ENDIAN__
++#endif
++#else
+ #include <endian.h>
+ #endif
+ #endif
++#endif
+ 
+ namespace sha256 {
+ 
+diff --git a/include/rex/platform/ps5_guest_arena.h b/include/rex/platform/ps5_guest_arena.h
+new file mode 100644
+index 0000000..e2d6bb2
+--- /dev/null
++++ b/include/rex/platform/ps5_guest_arena.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <ps5platform/shm.h>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace rex::memory {
++
++class Ps5GuestArena {
++public:
++    static constexpr size_t kUnit = 0x10000;
++    static constexpr size_t kSize = 0x120000000ULL;
++
++    ~Ps5GuestArena();
++
++    bool initialize();
++    bool mapVirtual(uint32_t guest_offset);
++    bool mapPhysical(uint32_t offset);
++    bool mapXex(uint32_t offset);
++    bool unmapPhysical(uint32_t offset);
++    bool unmapXex(uint32_t offset);
++    bool shutdown();
++
++    uint8_t* address(uint64_t guestAddress) const;
++
++private:
++    struct Unit {
++        uint32_t offset = 0;
++        bool xex = false;
++        bool virtual_mem = false;
++        ps5_shm backing{};
++        std::array<void*, 5> views{};
++    };
++
++    void* base_ = nullptr;
++    std::vector<Unit> units_;
++
++    bool mapUnit(uint32_t offset, bool xex);
++    bool unmapUnit(uint32_t offset, bool xex);
++    static bool releaseUnit(Unit& unit);
++};
++
++}
+diff --git a/src/core/clock_ps5.cpp b/src/core/clock_ps5.cpp
+new file mode 100644
+index 0000000..41f7f23
+--- /dev/null
++++ b/src/core/clock_ps5.cpp
+@@ -0,0 +1,41 @@
++#include <rex/chrono/clock.h>
++#include <ps5platform/kernel.h>
++#include <sys/time.h>
++#include <cstdint>
++
++namespace rex::chrono {
++
++uint64_t Clock::host_tick_frequency_platform() {
++    return sceKernelGetTscFrequency();
++}
++
++uint64_t Clock::host_tick_count_platform() {
++    return sceKernelReadTsc();
++}
++
++uint64_t Clock::QueryHostSystemTime() {
++    timeval now{};
++    if (gettimeofday(&now, nullptr) != 0)
++        return 0;
++
++    // Convert Unix time to Windows FILETIME:
++    // 100-nanosecond intervals since January 1, 1601.
++    constexpr uint64_t epochOffset = 11644473600ULL;
++
++    return (static_cast<uint64_t>(now.tv_sec) + epochOffset)
++               * 10000000ULL
++           + static_cast<uint64_t>(now.tv_usec) * 10ULL;
++}
++
++uint64_t Clock::QueryHostUptimeMillis() {
++    const uint64_t frequency = host_tick_frequency_platform();
++    if (!frequency)
++        return 0;
++
++    const uint64_t ticks = host_tick_count_platform();
++
++    return static_cast<uint64_t>(
++        static_cast<__uint128_t>(ticks) * 1000 / frequency);
++}
++
++} // namespace rex::chrono
+diff --git a/src/core/exception_handler_ps5.cpp b/src/core/exception_handler_ps5.cpp
+new file mode 100644
+index 0000000..c306e62
+--- /dev/null
++++ b/src/core/exception_handler_ps5.cpp
+@@ -0,0 +1,200 @@
++#include <rex/exception_handler.h>
++#include <rex/platform.h>
++#include <ps5platform/context.h>
++
++#include <signal.h>
++#include <ucontext.h>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <utility>
++
++static_assert(REX_PLATFORM_PS5, "PS5 backend only");
++
++namespace rex::arch {
++
++namespace {
++
++constexpr size_t kMaxHandlers = 8;
++std::pair<ExceptionHandler::Handler, void*> handlers[kMaxHandlers]{};
++
++struct sigaction oldSegv{};
++struct sigaction oldBus{};
++struct sigaction oldIll{};
++bool installed = false;
++
++const struct sigaction* previousAction(int signal) {
++    switch (signal) {
++    case SIGSEGV: return &oldSegv;
++    case SIGBUS:  return &oldBus;
++    case SIGILL:  return &oldIll;
++    default:      return nullptr;
++    }
++}
++
++void handleSignal(int signal, siginfo_t* info, void* opaque) {
++    if (!opaque || !info)
++        std::_Exit(128 + signal);
++
++    auto& mc = reinterpret_cast<ucontext_t*>(opaque)->uc_mcontext;
++
++    // x86-64 register order required by ReXGlue.
++    using Reg = decltype(mc.mc_rax);
++    Reg* regs[16] = {
++        &mc.mc_rax, &mc.mc_rcx, &mc.mc_rdx, &mc.mc_rbx,
++        &mc.mc_rsp, &mc.mc_rbp, &mc.mc_rsi, &mc.mc_rdi,
++        &mc.mc_r8,  &mc.mc_r9,  &mc.mc_r10, &mc.mc_r11,
++        &mc.mc_r12, &mc.mc_r13, &mc.mc_r14, &mc.mc_r15
++    };
++
++    HostThreadContext ctx{};
++    ctx.rip = static_cast<uint64_t>(mc.mc_rip);
++    ctx.eflags = static_cast<uint32_t>(mc.mc_rflags);
++
++    for (unsigned i = 0; i < 16; ++i)
++        ctx.int_registers[i] = static_cast<uint64_t>(*regs[i]);
++
++    // FreeBSD x86-64 uses a 512-byte FXSAVE area.
++    // Its XMM0-XMM15 registers begin at byte offset 160.
++    const bool hasXmm =
++        mc.mc_fpformat == _MC_FPFMT_XMM &&
++        mc.mc_ownedfp != _MC_FPOWNED_NONE;
++
++    constexpr size_t kXmmOffset = 160;
++    static_assert(sizeof(mc.mc_fpstate) >=
++                  kXmmOffset + sizeof(ctx.xmm_registers));
++
++    if (hasXmm) {
++        std::memcpy(ctx.xmm_registers,
++                    reinterpret_cast<const uint8_t*>(mc.mc_fpstate)
++                        + kXmmOffset,
++                    sizeof(ctx.xmm_registers));
++    }
++
++    Exception ex;
++
++    if (signal == SIGILL) {
++        ex.InitializeIllegalInstruction(&ctx);
++    } else {
++        const auto operation =
++            (static_cast<uint64_t>(mc.mc_err) & 2)
++            ? Exception::AccessViolationOperation::kWrite
++            : Exception::AccessViolationOperation::kRead;
++
++        ex.InitializeAccessViolation(
++            &ctx,
++            reinterpret_cast<uint64_t>(info->si_addr),
++            operation);
++    }
++
++    for (const auto& entry : handlers) {
++        if (!entry.first)
++            break;
++
++        if (!entry.first(&ex, entry.second))
++            continue;
++
++        // Write modified CPU state back to the signal context.
++        mc.mc_rip = static_cast<Reg>(ctx.rip);
++        mc.mc_rflags = static_cast<Reg>(ctx.eflags);
++
++        const uint16_t changed = ex.modified_int_registers();
++
++        for (unsigned i = 0; i < 16; ++i) {
++            if (changed & (uint16_t(1) << i))
++                *regs[i] = static_cast<Reg>(ctx.int_registers[i]);
++        }
++
++        const uint16_t changedXmm = ex.modified_xmm_registers();
++
++        if (changedXmm && !hasXmm)
++            std::_Exit(128 + signal);
++
++        auto* fp = reinterpret_cast<uint8_t*>(mc.mc_fpstate);
++
++        for (unsigned i = 0; i < 16; ++i) {
++            if (changedXmm & (uint16_t(1) << i)) {
++                std::memcpy(fp + kXmmOffset + i * 16,
++                            &ctx.xmm_registers[i], 16);
++            }
++        }
++
++        return;
++    }
++
++    // Never silently retry an unhandled fault forever.
++    if (const auto* previous = previousAction(signal)) {
++        sigaction(signal, previous, nullptr);
++        raise(signal);
++    }
++    std::_Exit(128 + signal);
++}
++
++} // namespace
++
++void ExceptionHandler::Install(Handler fn, void* data) {
++    if (!fn)
++        std::abort();
++
++    size_t slot = kMaxHandlers;
++    for (size_t i = 0; i < kMaxHandlers; ++i) {
++        if (!handlers[i].first) {
++            slot = i;
++            break;
++        }
++    }
++
++    if (slot == kMaxHandlers)
++        std::abort();
++
++    if (!installed) {
++        struct sigaction action{};
++        action.sa_sigaction = handleSignal;
++        action.sa_flags = SA_SIGINFO;
++        sigemptyset(&action.sa_mask);
++
++        if (sigaction(SIGSEGV, &action, &oldSegv) != 0)
++            std::abort();
++
++        if (sigaction(SIGBUS, &action, &oldBus) != 0) {
++            sigaction(SIGSEGV, &oldSegv, nullptr);
++            std::abort();
++        }
++
++        if (sigaction(SIGILL, &action, &oldIll) != 0) {
++            sigaction(SIGBUS, &oldBus, nullptr);
++            sigaction(SIGSEGV, &oldSegv, nullptr);
++            std::abort();
++        }
++
++        installed = true;
++    }
++
++    handlers[slot] = {fn, data};
++}
++
++void ExceptionHandler::Uninstall(Handler fn, void* data) {
++    for (size_t i = 0; i < kMaxHandlers; ++i) {
++        if (handlers[i].first == fn &&
++            handlers[i].second == data) {
++            for (size_t j = i; j + 1 < kMaxHandlers; ++j)
++                handlers[j] = handlers[j + 1];
++
++            handlers[kMaxHandlers - 1] = {};
++            break;
++        }
++    }
++
++    bool active = false;
++    for (const auto& entry : handlers)
++        active |= entry.first != nullptr;
++
++    if (!active && installed) {
++        sigaction(SIGILL, &oldIll, nullptr);
++        sigaction(SIGBUS, &oldBus, nullptr);
++        sigaction(SIGSEGV, &oldSegv, nullptr);
++        installed = false;
++    }
++}
++
++} // namespace rex::arch
+diff --git a/src/core/memory_ps5.cpp b/src/core/memory_ps5.cpp
+new file mode 100644
+index 0000000..1c55a3d
+--- /dev/null
++++ b/src/core/memory_ps5.cpp
+@@ -0,0 +1,77 @@
++#include <rex/memory/utils.h>
++#include <ps5platform/kernel.h>
++#include <cstdint>
++
++namespace rex::memory {
++
++size_t page_size() {
++    return PS5_KERNEL_PAGE_SIZE;
++}
++
++size_t allocation_granularity() {
++    return PS5_KERNEL_DIRECT_ALIGNMENT;
++}
++
++static int ps5Protection(PageAccess access) {
++    switch (access) {
++    case PageAccess::kNoAccess: return 0;
++    case PageAccess::kReadOnly: return PS5_KERNEL_PROT_CPU_READ;
++    case PageAccess::kReadWrite: return PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE;
++    case PageAccess::kExecuteReadOnly: return PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_EXEC;
++    case PageAccess::kExecuteReadWrite: return PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE | PS5_KERNEL_PROT_CPU_EXEC;
++    }
++    return 0;
++}
++
++static PageAccess rexProtection(uint32_t flags) {
++    bool read = flags & PS5_KERNEL_PROT_CPU_READ;
++    bool write = flags & PS5_KERNEL_PROT_CPU_WRITE;
++    bool exec = flags & PS5_KERNEL_PROT_CPU_EXEC;
++
++    if (exec) return write ? PageAccess::kExecuteReadWrite : PageAccess::kExecuteReadOnly;
++    if (write) return PageAccess::kReadWrite;
++    if (read) return PageAccess::kReadOnly;
++    return PageAccess::kNoAccess;
++}
++
++bool QueryProtect(void* address, size_t& length, PageAccess& access) {
++    void *start = nullptr, *end = nullptr;
++    uint32_t flags = 0;
++
++    if (!address || sceKernelQueryMemoryProtection(
++            address, &start, &end, &flags) != 0)
++        return false;
++
++    if ((uintptr_t)end <= (uintptr_t)start)
++        return false;
++
++    length = (uintptr_t)end - (uintptr_t)start;
++    access = rexProtection(flags);
++    return true;
++}
++
++bool Protect(void* address, size_t length, PageAccess access,
++             PageAccess* old_access) {
++    if (!address || !length)
++        return false;
++
++    if (old_access) {
++        size_t old_length = 0;
++        if (!QueryProtect(address, old_length, *old_access))
++            return false;
++    }
++
++    const uintptr_t page = PS5_KERNEL_PAGE_SIZE;
++    const uintptr_t start = (uintptr_t)address & ~(page - 1);
++    const uintptr_t last = (uintptr_t)address + length;
++
++    if (last < (uintptr_t)address || last > UINTPTR_MAX - (page - 1))
++        return false;
++
++    const uintptr_t end = (last + page - 1) & ~(page - 1);
++
++    return sceKernelMprotect(
++        (void*)start, end - start, ps5Protection(access)) == 0;
++}
++
++} // namespace rex::memory
+diff --git a/src/core/memory_ps5_alloc.cpp b/src/core/memory_ps5_alloc.cpp
+new file mode 100644
+index 0000000..bbca6a6
+--- /dev/null
++++ b/src/core/memory_ps5_alloc.cpp
+@@ -0,0 +1,144 @@
++#include <rex/memory/utils.h>
++#include <ps5platform/shm.h>
++#include <vector>
++#include <mutex>
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++
++namespace {
++constexpr size_t kPage = 0x4000;
++constexpr size_t kUnit = 0x10000;
++
++struct Reservation {
++    uintptr_t base;
++    size_t bytes;
++};
++
++std::mutex regionMutex;
++std::vector<Reservation> regions;
++
++bool contains(const Reservation& r, void* p, size_t n) {
++    auto addr = reinterpret_cast<uintptr_t>(p);
++    return n && addr >= r.base && n <= r.bytes
++        && addr - r.base <= r.bytes - n;
++}
++
++int protection(rex::memory::PageAccess access) {
++    using rex::memory::PageAccess;
++    switch (access) {
++    case PageAccess::kNoAccess: return 0;
++    case PageAccess::kReadOnly: return PS5_SHM_READ;
++    case PageAccess::kReadWrite: return PS5_SHM_READ | PS5_SHM_WRITE;
++    case PageAccess::kExecuteReadOnly: return PS5_SHM_READ | PS5_SHM_EXEC;
++    case PageAccess::kExecuteReadWrite:
++        return PS5_SHM_READ | PS5_SHM_WRITE | PS5_SHM_EXEC;
++    }
++    return 0;
++}
++}
++
++namespace rex::memory {
++
++void* AllocFixed(void* address, size_t length,
++                 AllocationType type, PageAccess access) {
++    if (!length || length > SIZE_MAX - (kUnit - 1))
++        return nullptr;
++
++    std::lock_guard<std::mutex> lock(regionMutex);
++
++    if (type == AllocationType::kCommit) {
++        if (!address ||
++            reinterpret_cast<uintptr_t>(address) % kPage ||
++            length % kPage)
++            return nullptr;
++
++        auto it = std::find_if(regions.begin(), regions.end(),
++            [&](const Reservation& r) {
++                return contains(r, address, length);
++            });
++
++        if (it == regions.end())
++            return nullptr;
++
++        return ps5_vrange_commit(address, length, protection(access)) == 0
++            ? address : nullptr;
++    }
++
++    if (type != AllocationType::kReserve &&
++        type != AllocationType::kReserveCommit)
++        return nullptr;
++
++    if ((address && reinterpret_cast<uintptr_t>(address) % kUnit) ||
++        (type == AllocationType::kReserveCommit && length % kPage))
++        return nullptr;
++
++    const size_t reservedBytes = (length + kUnit - 1) & ~(kUnit - 1);
++    void* reserved = nullptr;
++    int rc = 0;
++
++    if (address) {
++        rc = ps5_vrange_reserve_at(address, reservedBytes);
++        reserved = address;
++    } else {
++        rc = ps5_vrange_reserve(reservedBytes, nullptr, kUnit, &reserved);
++    }
++
++    if (rc || !reserved)
++        return nullptr;
++
++    if (type == AllocationType::kReserveCommit &&
++        ps5_vrange_commit(reserved, length, protection(access)) != 0) {
++        ps5_vrange_release(reserved, reservedBytes);
++        return nullptr;
++    }
++
++    regions.push_back({reinterpret_cast<uintptr_t>(reserved), reservedBytes});
++    return reserved;
++}
++
++bool DeallocFixed(void* address, size_t length,
++                  DeallocationType type) {
++    if (!address)
++        return false;
++
++    std::lock_guard<std::mutex> lock(regionMutex);
++
++    if (type == DeallocationType::kRelease) {
++        if (length != 0)
++            return false;
++
++        auto it = std::find_if(regions.begin(), regions.end(),
++            [&](const Reservation& r) {
++                return r.base == reinterpret_cast<uintptr_t>(address);
++            });
++
++        if (it == regions.end())
++            return false;
++
++        if (ps5_vrange_release(address, it->bytes) != 0)
++            return false;
++
++        regions.erase(it);
++        return true;
++    }
++
++    if (type == DeallocationType::kDecommit) {
++        if (!length ||
++            reinterpret_cast<uintptr_t>(address) % kPage ||
++            length % kPage)
++            return false;
++
++        auto it = std::find_if(regions.begin(), regions.end(),
++            [&](const Reservation& r) {
++                return contains(r, address, length);
++            });
++
++        return it != regions.end() &&
++            ps5_vrange_decommit(address, length) == 0;
++    }
++
++    return false;
++}
++
++} // namespace rex::memory
+diff --git a/src/core/ps5_guest_arena.cpp b/src/core/ps5_guest_arena.cpp
+new file mode 100644
+index 0000000..ad35bd6
+--- /dev/null
++++ b/src/core/ps5_guest_arena.cpp
+@@ -0,0 +1,180 @@
++#include <rex/platform/ps5_guest_arena.h>
++#include <algorithm>
++
++namespace rex::memory {
++
++Ps5GuestArena::~Ps5GuestArena() {
++    shutdown();
++}
++
++bool Ps5GuestArena::initialize() {
++    if (base_) return true;
++
++    return ps5_vrange_reserve(
++        kSize,
++        reinterpret_cast<void*>(0x1000000000ULL),
++        kUnit,
++        &base_) == 0;
++}
++
++uint8_t* Ps5GuestArena::address(uint64_t guestAddress) const {
++    if (!base_ || guestAddress >= kSize)
++        return nullptr;
++
++    return static_cast<uint8_t*>(base_) + guestAddress;
++}
++
++
++bool Ps5GuestArena::mapVirtual(uint32_t offset) {
++    if (!base_ || offset % kUnit || offset >= 0x7F000000U)
++        return false;
++
++    for (const auto& unit : units_)
++        if (unit.virtual_mem && unit.offset == offset)
++            return true;
++
++    Unit unit{};
++    unit.offset = offset;
++    unit.virtual_mem = true;
++
++    if (ps5_shm_create(kUnit, &unit.backing) != 0)
++        return false;
++
++    void* view = nullptr;
++    const int rc = ps5_shm_map(
++        &unit.backing, 0, kUnit, address(offset),
++        PS5_SHM_READ | PS5_SHM_WRITE,
++        PS5_SHM_FIXED, &view);
++
++    if (rc != 0) {
++        ps5_shm_destroy(&unit.backing);
++        return false;
++    }
++
++    unit.views[0] = view;
++    units_.push_back(unit);
++    return true;
++}
++
++bool Ps5GuestArena::mapPhysical(uint32_t offset) {
++    return mapUnit(offset, false);
++}
++
++bool Ps5GuestArena::mapXex(uint32_t offset) {
++    return mapUnit(offset, true);
++}
++
++bool Ps5GuestArena::mapUnit(uint32_t offset, bool xex) {
++    if (!base_ || offset % kUnit)
++        return false;
++
++    if (offset >= (xex ? 0x10000000U : 0x20000000U))
++        return false;
++
++    for (const auto& unit : units_)
++        if (!unit.virtual_mem && unit.offset == offset && unit.xex == xex)
++            return true;
++
++    Unit unit{};
++    unit.offset = offset;
++    unit.xex = xex;
++
++    if (ps5_shm_create(kUnit, &unit.backing) != 0)
++        return false;
++
++    const uint64_t targets[5] = {
++        xex ? 0x80000000ULL : 0x100000000ULL,
++        xex ? 0x90000000ULL : 0xA0000000ULL,
++        xex ? 0 : 0xC0000000ULL,
++        xex ? 0 : 0xE0000000ULL,
++        xex ? 0 : 0x7F000000ULL
++    };
++
++    const unsigned count = xex ? 2 :
++        (offset < 0x01000000U ? 5 : 4);
++
++    for (unsigned i = 0; i < count; ++i) {
++        void* target = address(targets[i] + offset);
++
++        int rc = ps5_shm_map(
++            &unit.backing, 0, kUnit, target,
++            PS5_SHM_READ | PS5_SHM_WRITE,
++            PS5_SHM_FIXED, &unit.views[i]);
++
++        if (rc != 0) {
++            releaseUnit(unit);
++            return false;
++        }
++    }
++
++    units_.push_back(unit);
++    return true;
++}
++
++bool Ps5GuestArena::releaseUnit(Unit& unit) {
++    bool ok = true;
++
++    for (auto& view : unit.views) {
++        if (!view) continue;
++
++        if (ps5_shm_unmap(
++                view, kUnit, PS5_SHM_KEEP_RESERVED) == 0)
++            view = nullptr;
++        else
++            ok = false;
++    }
++
++    if (ok)
++        ps5_shm_destroy(&unit.backing);
++
++    return ok;
++}
++
++bool Ps5GuestArena::unmapPhysical(uint32_t offset) {
++    return unmapUnit(offset, false);
++}
++
++bool Ps5GuestArena::unmapXex(uint32_t offset) {
++    return unmapUnit(offset, true);
++}
++
++bool Ps5GuestArena::unmapUnit(uint32_t offset, bool xex) {
++    auto it = std::find_if(
++        units_.begin(), units_.end(),
++        [&](const Unit& u) {
++            return !u.virtual_mem && u.offset == offset && u.xex == xex;
++        });
++
++    if (it == units_.end())
++        return false;
++
++    if (!releaseUnit(*it))
++        return false;
++
++    units_.erase(it);
++    return true;
++}
++
++bool Ps5GuestArena::shutdown() {
++    bool ok = true;
++
++    for (auto& unit : units_)
++        if (!releaseUnit(unit))
++            ok = false;
++
++    if (!ok)
++        return false;
++
++    units_.clear();
++
++    if (base_) {
++        if (ps5_vrange_release(base_, kSize) != 0)
++            return false;
++
++        base_ = nullptr;
++    }
++
++    return true;
++}
++
++}
+diff --git a/src/core/threading_ps5.cpp b/src/core/threading_ps5.cpp
+new file mode 100644
+index 0000000..d767d4f
+--- /dev/null
++++ b/src/core/threading_ps5.cpp
+@@ -0,0 +1,16 @@
++#include <rex/thread.h>
++#include <atomic>
++#include <cstdint>
++
++namespace rex::thread {
++
++uint32_t current_thread_system_id() {
++    static std::atomic<uint32_t> nextId{1};
++
++    thread_local const uint32_t id =
++        nextId.fetch_add(1, std::memory_order_relaxed);
++
++    return id;
++}
++
++} // namespace rex::thread

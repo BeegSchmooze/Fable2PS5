@@ -1,0 +1,6 @@
+out/
+game/*
+!game/README.md
+!game/.gitignore
+*.pyc
+__pycache__/
