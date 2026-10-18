@@ -59,7 +59,7 @@ spare, which is why 1440p costs nothing. See [Known issues](#known-issues).
 This repository does not set any of that up. Follow those projects' own instructions, and keep
 the services on a trusted local network.
 
-**Your own Fable II game files** (Xbox 360), dumped from a disc you own:
+**Your own Fable II GOTY game files** (Xbox 360), dumped from a disc you own:
 
 - `default.xex`, which must be this exact build of the game:
 
